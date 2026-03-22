@@ -213,12 +213,6 @@ function HomePage() {
               >
                 Bắt đầu chấm điểm
               </button>
-              <button
-                type="button"
-                className="rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              >
-                Xem demo hệ thống
-              </button>
             </div>
           </div>
 
@@ -229,8 +223,8 @@ function HomePage() {
               <p className="mt-1 text-sm text-slate-600">Tiết kiệm thời gian chấm điểm</p>
             </article>
             <article className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <h2 className="text-2xl font-bold text-slate-900">&lt; 2 phút</h2>
-              <p className="mt-1 text-sm text-slate-600">Xử lý mỗi bộ bài thi</p>
+              <h2 className="text-2xl font-bold text-slate-900">Theo quy mô</h2>
+              <p className="mt-1 text-sm text-slate-600">Thời gian xử lý phụ thuộc số lượng bài</p>
             </article>
             <article className="rounded-xl border border-slate-200 bg-slate-50 p-4">
               <h2 className="text-2xl font-bold text-slate-900">100%</h2>
