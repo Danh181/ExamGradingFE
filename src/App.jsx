@@ -12,18 +12,34 @@ import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import { authApi } from './services/authApi'
 
-const navItems = [
-  { key: 'grading', label: 'Chấm điểm', path: '/' },
-  { key: 'grades', label: 'Xem điểm', path: '/grades' },
-  { key: 'users', label: 'Quản lý người dùng', path: '/users' },
-  { key: 'subjects', label: 'Quản lý môn học', path: '/subjects' },
-  { key: 'semesters', label: 'Quản lý kì', path: '/semesters' },
-  { key: 'exam-sessions', label: 'Quản lý đợt thi', path: '/exam-sessions' },
-  { key: 'rubrics', label: 'Tiêu chí chấm điểm', path: '/rubrics' },
+const navGroups = [
+  {
+    key: 'exam-session-management',
+    label: 'Quản lý đợt thi',
+    items: [
+      { key: 'exam-sessions', label: 'Đợt thi', path: '/exam-sessions' },
+      { key: 'grading', label: 'Chấm điểm', path: '/' },
+      { key: 'grades', label: 'Xem điểm', path: '/grades' },
+      { key: 'rubrics', label: 'Tiêu chí chấm điểm', path: '/rubrics' },
+    ],
+  },
+  {
+    key: 'semester-management',
+    label: 'Quản lý kỳ',
+    items: [
+      { key: 'semesters', label: 'Kỳ học', path: '/semesters' },
+      { key: 'users', label: 'Người dùng', path: '/users' },
+      { key: 'subjects', label: 'Môn học', path: '/subjects' },
+    ],
+  },
 ]
 
 function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [expandedGroups, setExpandedGroups] = useState({
+    'exam-session-management': false,
+    'semester-management': false,
+  })
   const location = useLocation()
   const isAuthenticated = authApi.isAuthenticated()
   const lecturerName = authApi.getCurrentUserFullName()
@@ -62,6 +78,15 @@ function App() {
 
   const isActive = (path) =>
     location.pathname === path || location.pathname.startsWith(`${path}/`)
+
+  const isGroupActive = (groupItems) => groupItems.some((item) => isActive(item.path))
+
+  const toggleGroup = (groupKey) => {
+    setExpandedGroups((prev) => ({
+      ...prev,
+      [groupKey]: !prev[groupKey],
+    }))
+  }
 
   const handleLogout = () => {
     authApi.clearToken()
@@ -128,20 +153,54 @@ function App() {
           </div>
 
           <nav>
-            <ul className="space-y-2">
-              {navItems.map((item) => (
-                <li key={item.key}>
-                  <Link
-                    to={item.path}
-                    onClick={() => setIsSidebarOpen(false)}
-                    className={`block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
-                      isActive(item.path)
+            <ul className="space-y-4">
+              {navGroups.map((group) => (
+                <li key={group.key}>
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group.key)}
+                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold transition ${
+                      isGroupActive(group.items)
                         ? 'bg-violet-100 text-violet-700'
-                        : 'text-slate-700 hover:bg-violet-50 hover:text-violet-700'
+                        : 'text-slate-800 hover:bg-violet-50 hover:text-violet-700'
                     }`}
                   >
-                    {item.label}
-                  </Link>
+                    <span>{group.label}</span>
+                    <svg
+                      className={`h-4 w-4 transition-transform ${
+                        expandedGroups[group.key] ? 'rotate-180' : 'rotate-0'
+                      }`}
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </button>
+
+                  {expandedGroups[group.key] ? (
+                    <ul className="mt-2 space-y-1.5 pl-2">
+                      {group.items.map((item) => (
+                        <li key={item.key}>
+                          <Link
+                            to={item.path}
+                            onClick={() => setIsSidebarOpen(false)}
+                            className={`block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
+                              isActive(item.path)
+                                ? 'bg-violet-100 text-violet-700'
+                                : 'text-slate-700 hover:bg-violet-50 hover:text-violet-700'
+                            }`}
+                          >
+                            {item.label}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </li>
               ))}
             </ul>
