@@ -55,11 +55,149 @@ const gradeApi = {
   },
 }
 
+async function tryGet(path) {
+  const response = await fetch(buildApiUrl(path))
+
+  if (response.status === 404) {
+    return { found: false, data: null }
+  }
+
+  const data = await parseResponse(response)
+  return { found: true, data }
+}
+
+const normalizeReportId = (detail) => {
+  return (
+    detail?.analysisReportId ||
+    detail?.reportId ||
+    detail?.analysisReport?.id ||
+    detail?.analysisReport?.analysisReportId ||
+    null
+  )
+}
+
+const submissionApi = {
+  async getById(submissionId) {
+    if (!submissionId) return null
+
+    const candidates = [
+      `/api/submissions/${submissionId}`,
+      `/api/Submissions/${submissionId}`,
+    ]
+
+    for (const path of candidates) {
+      const result = await tryGet(path)
+      if (!result.found) continue
+      return result.data || null
+    }
+
+    return null
+  },
+}
+
+const userApi = {
+  async getById(userId) {
+    if (!userId) return null
+
+    const candidates = [`/api/users/${userId}`, `/api/Users/${userId}`]
+
+    for (const path of candidates) {
+      const result = await tryGet(path)
+      if (!result.found) continue
+      return result.data || null
+    }
+
+    return null
+  },
+}
+
+const analysisReportApi = {
+  async getBySubmissionId(submissionId) {
+    if (!submissionId) return null
+
+    const candidates = [
+      `/api/analysisreports/submission/${submissionId}`,
+      `/api/AnalysisReports/submission/${submissionId}`,
+    ]
+
+    for (const path of candidates) {
+      const result = await tryGet(path)
+      if (!result.found) continue
+
+      if (Array.isArray(result.data)) return result.data[0] || null
+      return result.data || null
+    }
+
+    return null
+  },
+}
+
+const violationApi = {
+  async getAll() {
+    const listCandidates = ['/api/violations', '/api/Violations']
+
+    for (const path of listCandidates) {
+      const result = await tryGet(path)
+      if (!result.found) continue
+
+      return Array.isArray(result.data) ? result.data : []
+    }
+
+    return []
+  },
+
+  async getByReportId(reportId) {
+    if (!reportId) return []
+
+    const reportRouteCandidates = [
+      `/api/violations/report/${reportId}`,
+      `/api/Violations/report/${reportId}`,
+    ]
+
+    for (const path of reportRouteCandidates) {
+      const result = await tryGet(path)
+      if (!result.found) continue
+
+      return Array.isArray(result.data) ? result.data : []
+    }
+
+    const byIdCandidates = [`/api/violations/${reportId}`, `/api/Violations/${reportId}`]
+    for (const path of byIdCandidates) {
+      const result = await tryGet(path)
+      if (!result.found) continue
+
+      if (!result.data) return []
+      return [result.data]
+    }
+
+    const list = await this.getAll()
+    return list.filter(
+      (item) =>
+        String(item?.analysisReportId || '').toLowerCase() ===
+        String(reportId || '').toLowerCase(),
+    )
+
+    return []
+  },
+}
+
 const formatScore = (value) => {
   if (value === null || value === undefined) return '--'
   const score = Number(value)
   if (Number.isNaN(score)) return '--'
   return score.toFixed(2)
+}
+
+const getScoreColorClass = (value) => {
+  const score = Number(value)
+  if (Number.isNaN(score)) return 'text-slate-900'
+
+  if (score === 0) return 'text-red-600'
+  if (score >= 0.25 && score <= 4) return 'text-orange-600'
+  if (score >= 4.25 && score <= 6.75) return 'text-amber-500'
+  if (score >= 7 && score <= 10) return 'text-emerald-600'
+
+  return 'text-slate-900'
 }
 
 function GradeReviewPage() {
@@ -77,6 +215,9 @@ function GradeReviewPage() {
   const [isUpdating, setIsUpdating] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [editScore, setEditScore] = useState('')
+  const [violations, setViolations] = useState([])
+  const [isViolationsLoading, setIsViolationsLoading] = useState(false)
+  const [violationsError, setViolationsError] = useState('')
 
   const loadGrades = async () => {
     try {
@@ -102,17 +243,16 @@ function GradeReviewPage() {
       const matchesKeyword =
         !keyword ||
         grade.studentId?.toLowerCase().includes(keyword) ||
-        grade.examinerName?.toLowerCase().includes(keyword) ||
-        grade.submissionId?.toLowerCase().includes(keyword)
+        grade.examinerName?.toLowerCase().includes(keyword)
 
       if (!matchesKeyword) return false
 
       const score = Number(grade.finalScore)
       if (scoreFilter === 'all' || Number.isNaN(score)) return true
-      if (scoreFilter === 'excellent') return score >= 8
-      if (scoreFilter === 'good') return score >= 6.5 && score < 8
-      if (scoreFilter === 'average') return score >= 5 && score < 6.5
-      if (scoreFilter === 'weak') return score < 5
+      if (scoreFilter === 'zero') return score === 0
+      if (scoreFilter === 'orange') return score >= 0.25 && score <= 4
+      if (scoreFilter === 'yellow') return score >= 4.25 && score <= 6.75
+      if (scoreFilter === 'green') return score >= 7 && score <= 10
 
       return true
     })
@@ -164,17 +304,74 @@ function GradeReviewPage() {
     }
   }, [currentPage, totalPages])
 
-  const handleReadDetail = async (id) => {
+  const handleReadDetail = async (gradeItem) => {
     try {
       setIsDetailLoading(true)
       setMessage(null)
-      const detail = await gradeApi.getById(id)
-      setSelectedGrade(detail)
+      setViolations([])
+      setViolationsError('')
+
+      const detail = await gradeApi.getById(gradeItem.id)
+
+      const mergedDetail = {
+        ...detail,
+        studentId: detail?.studentId || gradeItem?.studentId || '',
+        examinerName: detail?.examinerName || gradeItem?.examinerName || '',
+      }
+
+      setSelectedGrade(mergedDetail)
       setEditScore(
         detail?.finalScore === null || detail?.finalScore === undefined
           ? ''
           : String(detail.finalScore),
       )
+
+      setIsViolationsLoading(true)
+      try {
+        if (!detail?.submissionId) {
+          setViolations([])
+          setViolationsError('Bản ghi điểm chưa có SubmissionId để truy vấn vi phạm.')
+          return
+        }
+
+        const submission = await submissionApi.getById(detail.submissionId)
+        if (!submission?.id) {
+          setViolations([])
+          setViolationsError('Không tìm thấy Submission tương ứng cho bản ghi điểm này.')
+          return
+        }
+
+        if (!mergedDetail.studentId && submission?.studentId) {
+          mergedDetail.studentId = submission.studentId
+          setSelectedGrade((prev) => ({ ...(prev || {}), studentId: submission.studentId }))
+        }
+
+        if (!mergedDetail.examinerName && detail?.examinerId) {
+          const examiner = await userApi.getById(detail.examinerId)
+          if (examiner?.fullName) {
+            mergedDetail.examinerName = examiner.fullName
+            setSelectedGrade((prev) => ({ ...(prev || {}), examinerName: examiner.fullName }))
+          }
+        }
+
+        const report = await analysisReportApi.getBySubmissionId(submission.id)
+        const reportId = report?.id || normalizeReportId(detail)
+
+        if (!reportId) {
+          setViolations([])
+          setViolationsError(
+            'Không có AnalysisReport cho bài nộp này nên chưa có vi phạm để hiển thị.',
+          )
+          return
+        }
+
+        const violationData = await violationApi.getByReportId(reportId)
+        setViolations(Array.isArray(violationData) ? violationData : [])
+      } catch (error) {
+        setViolationsError(error.message || 'Không thể tải danh sách vi phạm.')
+      } finally {
+        setIsViolationsLoading(false)
+      }
     } catch (error) {
       setMessage({ type: 'error', text: error.message })
     } finally {
@@ -318,62 +515,96 @@ function GradeReviewPage() {
               ) : !selectedGrade ? (
                 <p className="text-sm text-slate-500">Chưa chọn bản ghi điểm nào.</p>
               ) : (
-                <dl className="space-y-3 text-sm">
-                  <div>
-                    <dt className="font-medium text-slate-500">Mã sinh viên</dt>
-                    <dd className="text-slate-900">{selectedGrade.studentId || '--'}</dd>
+                <div className="space-y-5">
+                  <dl className="space-y-3 text-sm">
+                    <div>
+                      <dt className="font-medium text-slate-500">Mã sinh viên</dt>
+                      <dd className="text-slate-900">{selectedGrade.studentId || '--'}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-slate-500">Giám khảo</dt>
+                      <dd className="text-slate-900">{selectedGrade.examinerName || '--'}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-slate-500">Điểm cuối cùng</dt>
+                      <dd className="text-slate-900">{formatScore(selectedGrade.finalScore)}</dd>
+                    </div>
+                    <div>
+                      <label className="font-medium text-slate-500" htmlFor="edit-score">
+                        Cập nhật điểm
+                      </label>
+                      <input
+                        id="edit-score"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={editScore}
+                        onChange={(event) => setEditScore(event.target.value)}
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={handleUpdateGrade}
+                        disabled={isUpdating || isDeleting}
+                        className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isUpdating ? 'Đang lưu...' : 'Lưu điểm'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteGrade(selectedGrade.id)}
+                        disabled={isUpdating || isDeleting}
+                        className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isDeleting ? 'Đang xóa...' : 'Xóa điểm'}
+                      </button>
+                    </div>
+                  </dl>
+
+                  <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold text-amber-900">Vi phạm phát hiện</h3>
+                      <span className="rounded-full border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                        {isViolationsLoading ? 'Đang tải...' : `${violations.length} mục`}
+                      </span>
+                    </div>
+
+                    {violationsError ? (
+                      <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                        {violationsError}
+                      </p>
+                    ) : isViolationsLoading ? (
+                      <p className="text-xs text-slate-600">Đang tải danh sách vi phạm...</p>
+                    ) : violations.length === 0 ? (
+                      <p className="text-xs text-emerald-700">
+                        Không có vi phạm cho bài nộp này hoặc chưa có báo cáo phân tích.
+                      </p>
+                    ) : (
+                      <ul className="space-y-2">
+                        {violations.map((violation) => (
+                          <li
+                            key={violation.id}
+                            className="rounded-lg border border-amber-200 bg-white p-2.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-semibold text-slate-900">
+                                {violation.violationType || 'Vi phạm chưa phân loại'}
+                              </p>
+                              <span className="rounded-md bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700">
+                                -{formatScore(violation.penaltyPoints)} điểm
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-600">
+                              {violation.description || 'Không có mô tả chi tiết.'}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
-                  <div>
-                    <dt className="font-medium text-slate-500">Giám khảo</dt>
-                    <dd className="text-slate-900">{selectedGrade.examinerName || '--'}</dd>
-                  </div>
-                  <div>
-                    <dt className="font-medium text-slate-500">Điểm cuối cùng</dt>
-                    <dd className="text-slate-900">{formatScore(selectedGrade.finalScore)}</dd>
-                  </div>
-                  <div>
-                    <label className="font-medium text-slate-500" htmlFor="edit-score">
-                      Cập nhật điểm
-                    </label>
-                    <input
-                      id="edit-score"
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={editScore}
-                      onChange={(event) => setEditScore(event.target.value)}
-                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-                    />
-                  </div>
-                  <div>
-                    <dt className="font-medium text-slate-500">SubmissionId</dt>
-                    <dd className="break-all font-mono text-xs text-slate-700">
-                      {selectedGrade.submissionId || '--'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="font-medium text-slate-500">GradeId</dt>
-                    <dd className="break-all font-mono text-xs text-slate-700">{selectedGrade.id}</dd>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={handleUpdateGrade}
-                      disabled={isUpdating || isDeleting}
-                      className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {isUpdating ? 'Đang lưu...' : 'Lưu điểm'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteGrade(selectedGrade.id)}
-                      disabled={isUpdating || isDeleting}
-                      className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {isDeleting ? 'Đang xóa...' : 'Xóa điểm'}
-                    </button>
-                  </div>
-                </dl>
+                </div>
               )}
             </div>
           </div>
@@ -386,7 +617,7 @@ function GradeReviewPage() {
                 type="text"
                 value={searchTerm}
                 onChange={(event) => setSearchTerm(event.target.value)}
-                placeholder="Tìm theo mã SV, giám khảo hoặc SubmissionId..."
+                placeholder="Tìm theo mã SV hoặc giám khảo..."
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100"
               />
 
@@ -396,10 +627,10 @@ function GradeReviewPage() {
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100 md:w-52"
               >
                 <option value="all">Tất cả mức điểm</option>
-                <option value="excellent">Xuất sắc (≥ 8)</option>
-                <option value="good">Khá (6.5 - &lt;8)</option>
-                <option value="average">Trung bình (5 - &lt;6.5)</option>
-                <option value="weak">Yếu (&lt; 5)</option>
+                <option value="zero">0 điểm (màu đỏ)</option>
+                <option value="orange">0.25 - 4 điểm (màu cam)</option>
+                <option value="yellow">4.25 - 6.75 điểm (màu vàng)</option>
+                <option value="green">7 - 10 điểm (màu xanh lá)</option>
               </select>
 
               <select
@@ -420,20 +651,19 @@ function GradeReviewPage() {
                     <th className="px-4 py-3 text-left font-semibold text-slate-700">Mã sinh viên</th>
                     <th className="px-4 py-3 text-left font-semibold text-slate-700">Giám khảo</th>
                     <th className="px-4 py-3 text-left font-semibold text-slate-700">Điểm</th>
-                    <th className="px-4 py-3 text-left font-semibold text-slate-700">SubmissionId</th>
                     <th className="px-4 py-3 text-left font-semibold text-slate-700">Thao tác</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 bg-white">
                   {isLoading ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-slate-600">
+                      <td colSpan={4} className="px-4 py-8 text-center text-slate-600">
                         Đang tải dữ liệu điểm...
                       </td>
                     </tr>
                   ) : paginatedGrades.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                      <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
                         Không có dữ liệu phù hợp.
                       </td>
                     </tr>
@@ -442,16 +672,13 @@ function GradeReviewPage() {
                       <tr key={grade.id} className="hover:bg-slate-50">
                         <td className="px-4 py-3 text-slate-800">{grade.studentId || '--'}</td>
                         <td className="px-4 py-3 text-slate-700">{grade.examinerName || '--'}</td>
-                        <td className="px-4 py-3 font-semibold text-slate-900">
+                        <td className={`px-4 py-3 font-semibold ${getScoreColorClass(grade.finalScore)}`}>
                           {formatScore(grade.finalScore)}
-                        </td>
-                        <td className="max-w-[220px] truncate px-4 py-3 font-mono text-xs text-slate-600">
-                          {grade.submissionId || '--'}
                         </td>
                         <td className="px-4 py-3">
                           <button
                             type="button"
-                            onClick={() => handleReadDetail(grade.id)}
+                            onClick={() => handleReadDetail(grade)}
                             className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100"
                           >
                             Xem

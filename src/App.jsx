@@ -8,6 +8,9 @@ import UserManagementPage from './pages/UserManagementPage'
 import ExamSessionManagementPage from './pages/ExamSessionManagementPage'
 import RubricManagementPage from './pages/RubricManagementPage'
 import GradeReviewPage from './pages/GradeReviewPage'
+import LoginPage from './pages/LoginPage'
+import RegisterPage from './pages/RegisterPage'
+import { authApi } from './services/authApi'
 
 const navItems = [
   { key: 'grading', label: 'Chấm điểm', path: '/' },
@@ -22,6 +25,33 @@ const navItems = [
 function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const location = useLocation()
+  const isAuthenticated = authApi.isAuthenticated()
+  const lecturerName = authApi.getCurrentUserFullName()
+  
+  // Trang không cần header/sidebar
+  const authPages = ['/login', '/register']
+  const isAuthPage = authPages.includes(location.pathname)
+
+  // Nếu chưa đăng nhập và không ở trang login/register, redirect tới login
+  if (!isAuthenticated && !isAuthPage) {
+    return <Navigate to="/login" replace />
+  }
+
+  // Nếu đã đăng nhập và ở trang login/register, redirect tới trang chủ
+  if (isAuthenticated && isAuthPage) {
+    return <Navigate to="/" replace />
+  }
+
+  // Nếu ở trang login/register, hiển thị không có header/sidebar
+  if (isAuthPage) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+      </Routes>
+    )
+  }
+
   const isFullWidthPage =
     location.pathname.startsWith('/grades') ||
     location.pathname.startsWith('/subjects') ||
@@ -32,6 +62,11 @@ function App() {
 
   const isActive = (path) =>
     location.pathname === path || location.pathname.startsWith(`${path}/`)
+
+  const handleLogout = () => {
+    authApi.clearToken()
+    window.location.href = '/login'
+  }
 
   return (
     <main className="min-h-screen bg-slate-50">
@@ -45,19 +80,33 @@ function App() {
             <FPTLogo />
           </Link>
 
-          <button
-            type="button"
-            onClick={() => setIsSidebarOpen((prev) => !prev)}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white shadow-sm transition hover:bg-slate-100 md:hidden"
-            aria-label="Mở điều hướng"
-          >
-            <span className="sr-only">Mở điều hướng</span>
-            <div className="space-y-1.5">
-              <span className="block h-0.5 w-5 rounded bg-slate-700" />
-              <span className="block h-0.5 w-5 rounded bg-slate-700" />
-              <span className="block h-0.5 w-5 rounded bg-slate-700" />
-            </div>
-          </button>
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:inline-block text-sm font-medium text-slate-600">
+              Xin chào{lecturerName ? `, ${lecturerName}` : ''}
+            </span>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="hidden sm:inline-flex px-4 py-2 text-sm font-medium text-slate-700 rounded-lg border border-slate-200 bg-white shadow-sm transition hover:bg-slate-100"
+            >
+              Đăng xuất
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen((prev) => !prev)}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white shadow-sm transition hover:bg-slate-100 md:hidden"
+              aria-label="Mở điều hướng"
+            >
+              <span className="sr-only">Mở điều hướng</span>
+              <div className="space-y-1.5">
+                <span className="block h-0.5 w-5 rounded bg-slate-700" />
+                <span className="block h-0.5 w-5 rounded bg-slate-700" />
+                <span className="block h-0.5 w-5 rounded bg-slate-700" />
+              </div>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -96,6 +145,20 @@ function App() {
                 </li>
               ))}
             </ul>
+
+            {/* Logout button for mobile */}
+            <div className="mt-8 border-t border-slate-200 pt-4 md:hidden">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSidebarOpen(false)
+                  handleLogout()
+                }}
+                className="w-full rounded-lg bg-red-50 px-3 py-2 text-left text-sm font-medium text-red-700 transition hover:bg-red-100"
+              >
+                Đăng xuất
+              </button>
+            </div>
           </nav>
         </aside>
 
@@ -122,6 +185,8 @@ function App() {
               <Route path="/users" element={<UserManagementPage />} />
               <Route path="/exam-sessions" element={<ExamSessionManagementPage />} />
               <Route path="/rubrics" element={<RubricManagementPage />} />
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
