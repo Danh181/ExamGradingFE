@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 
+// Blob <-> Base64 conversion
+const base64ToBlob = (base64Data) => {
+  const arr = base64Data.split(',')
+  const mime = arr[0].match(/:(.*?);/)[1]
+  const bstr = atob(arr[1])
+  const n = bstr.length
+  const u8arr = new Uint8Array(n)
+  for (let i = 0; i < n; i++) {
+    u8arr[i] = bstr.charCodeAt(i)
+  }
+  return new Blob([u8arr], { type: mime })
+}
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 const buildApiUrl = (path) => (API_BASE_URL ? `${API_BASE_URL}${path}` : path)
@@ -193,9 +206,8 @@ const getScoreColorClass = (value) => {
   if (Number.isNaN(score)) return 'text-slate-900'
 
   if (score === 0) return 'text-red-600'
-  if (score >= 0.25 && score <= 4) return 'text-orange-600'
-  if (score >= 4.25 && score <= 6.75) return 'text-amber-500'
-  if (score >= 7 && score <= 10) return 'text-emerald-600'
+  if (score > 0 && score < 5) return 'text-orange-700'
+  if (score >= 5 && score <= 10) return 'text-emerald-700'
 
   return 'text-slate-900'
 }
@@ -218,6 +230,7 @@ function GradeReviewPage() {
   const [violations, setViolations] = useState([])
   const [isViolationsLoading, setIsViolationsLoading] = useState(false)
   const [violationsError, setViolationsError] = useState('')
+  const [gradingResult, setGradingResult] = useState(null)
 
   const loadGrades = async () => {
     try {
@@ -236,6 +249,18 @@ function GradeReviewPage() {
     loadGrades()
   }, [])
 
+  // Load grading result from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('gradingResult')
+      if (saved) {
+        setGradingResult(JSON.parse(saved))
+      }
+    } catch (error) {
+      console.error('Lỗi tải grading result từ localStorage:', error)
+    }
+  }, [])
+
   const filteredGrades = useMemo(() => {
     const keyword = searchTerm.trim().toLowerCase()
 
@@ -250,9 +275,8 @@ function GradeReviewPage() {
       const score = Number(grade.finalScore)
       if (scoreFilter === 'all' || Number.isNaN(score)) return true
       if (scoreFilter === 'zero') return score === 0
-      if (scoreFilter === 'orange') return score >= 0.25 && score <= 4
-      if (scoreFilter === 'yellow') return score >= 4.25 && score <= 6.75
-      if (scoreFilter === 'green') return score >= 7 && score <= 10
+      if (scoreFilter === 'orange') return score > 0 && score < 5
+      if (scoreFilter === 'green') return score >= 5 && score <= 10
 
       return true
     })
@@ -445,6 +469,25 @@ function GradeReviewPage() {
     }
   }
 
+  const handleDownloadResult = () => {
+    if (!gradingResult?.fileBlob || !gradingResult?.fileName) return
+
+    try {
+      const blob = base64ToBlob(gradingResult.fileBlob)
+      const downloadUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = downloadUrl
+      anchor.download = gradingResult.fileName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(downloadUrl)
+    } catch (error) {
+      console.error('Lỗi tải file:', error)
+      setMessage({ type: 'error', text: 'Không thể tải file: ' + error.message })
+    }
+  }
+
   return (
     <section className="min-h-[calc(100vh-7.5rem)] rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
       <div className="rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50 to-blue-50 p-5 md:p-6">
@@ -460,13 +503,24 @@ function GradeReviewPage() {
               Theo dõi điểm cuối cùng theo từng bài nộp và giám khảo chấm điểm.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={loadGrades}
-            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-          >
-            Tải lại danh sách
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={loadGrades}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+            >
+              Tải lại danh sách
+            </button>
+            {gradingResult && (
+              <button
+                type="button"
+                onClick={handleDownloadResult}
+                className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+              >
+                Tải file Excel
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -628,9 +682,8 @@ function GradeReviewPage() {
               >
                 <option value="all">Tất cả mức điểm</option>
                 <option value="zero">0 điểm (màu đỏ)</option>
-                <option value="orange">0.25 - 4 điểm (màu cam)</option>
-                <option value="yellow">4.25 - 6.75 điểm (màu vàng)</option>
-                <option value="green">7 - 10 điểm (màu xanh lá)</option>
+                <option value="orange">Trên 0 đến dưới 5 (màu cam đậm)</option>
+                <option value="green">Từ 5 đến 10 (màu xanh lá đậm)</option>
               </select>
 
               <select

@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { authApi } from '../services/authApi'
 
 const VITE_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
 
@@ -12,7 +13,39 @@ const parseResponse = async (response) => {
   if (contentType && contentType.includes('application/json')) {
     return await response.json()
   }
-  return null
+
+  const text = await response.text()
+  return text || null
+}
+
+const getRealtimeScoreColorClass = (scoreValue) => {
+  const score = Number(scoreValue)
+  if (Number.isNaN(score)) return 'text-slate-700'
+  if (score === 0) return 'text-red-600'
+  if (score > 0 && score < 5) return 'text-orange-700'
+  return 'text-emerald-700'
+}
+
+// Blob <-> Base64 conversion
+const blobToBase64 = async (blob) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
+const base64ToBlob = (base64Data) => {
+  const arr = base64Data.split(',')
+  const mime = arr[0].match(/:(.*?);/)[1]
+  const bstr = atob(arr[1])
+  const n = bstr.length
+  const u8arr = new Uint8Array(n)
+  for (let i = 0; i < n; i++) {
+    u8arr[i] = bstr.charCodeAt(i)
+  }
+  return new Blob([u8arr], { type: mime })
 }
 
 // API functions
@@ -26,43 +59,112 @@ const examSessionApi = {
   },
 }
 
-const userApi = {
+const submissionApi = {
   getAll: async () => {
-    const response = await fetch(buildApiUrl('/api/users'))
+    const response = await fetch(buildApiUrl('/api/submissions'))
     if (!response.ok) {
-      throw new Error('Lỗi tải danh sách người dùng')
+      throw new Error('Lỗi tải danh sách bài nộp')
+    }
+    return await parseResponse(response)
+  },
+}
+
+const gradeApi = {
+  getAll: async () => {
+    const response = await fetch(buildApiUrl('/api/grades'))
+    if (!response.ok) {
+      throw new Error('Lỗi tải danh sách điểm')
     }
     return await parseResponse(response)
   },
 }
 
 const gradingApi = {
-  processBatch: async (formData) => {
-    const response = await fetch(buildApiUrl('/api/grading/process-batch'), {
+  processBatchExcel: async (formData) => {
+    const token = authApi.getToken()
+
+    const response = await fetch(buildApiUrl('/api/grading/process-batch-excel'), {
       method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: formData,
     })
+
     if (!response.ok) {
       const error = await parseResponse(response)
-      throw new Error(error?.message || 'Lỗi chấm bài thi')
+      const errorMessage =
+        typeof error === 'string' ? error : error?.message || 'Lỗi chấm bài thi'
+      throw new Error(errorMessage)
     }
-    return await parseResponse(response)
+
+    const blob = await response.blob()
+    const contentDisposition = response.headers.get('content-disposition') || ''
+    const fileNameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i)
+    const fileName = decodeURIComponent(fileNameMatch?.[1] || fileNameMatch?.[2] || 'grading-result.xlsx')
+
+    return { blob, fileName }
   },
 }
 
 function HomePage() {
   const [examSessions, setExamSessions] = useState([])
-  const [users, setUsers] = useState([])
   const [isGradingModalOpen, setIsGradingModalOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isLoadingData, setIsLoadingData] = useState(true)
   const [message, setMessage] = useState(null)
   const [gradingResult, setGradingResult] = useState(null)
+  const [liveProgress, setLiveProgress] = useState({
+    totalSubmissions: 0,
+    gradedCount: 0,
+    latestStudents: [],
+  })
+  const gradedSubmissionIdSetRef = useRef(new Set())
+  const baselineSubmissionIdSetRef = useRef(new Set())
+  const notificationQueueRef = useRef([])
+  const notificationDrainIntervalRef = useRef(null)
+
+  const getGradedCountByExamSession = async (examSessionId) => {
+    const [submissions, grades] = await Promise.all([submissionApi.getAll(), gradeApi.getAll()])
+
+    const sessionSubmissionIds = new Set(
+      (Array.isArray(submissions) ? submissions : [])
+        .filter((submission) => submission.examSessionId === examSessionId)
+        .map((submission) => submission.id),
+    )
+
+    const gradedCount = (Array.isArray(grades) ? grades : []).filter((grade) =>
+      sessionSubmissionIds.has(grade.submissionId),
+    ).length
+
+    return gradedCount
+  }
+
+  const getGradingProgressByExamSession = async (examSessionId) => {
+    const [submissions, grades] = await Promise.all([submissionApi.getAll(), gradeApi.getAll()])
+
+    const sessionSubmissions = (Array.isArray(submissions) ? submissions : []).filter(
+      (submission) => submission.examSessionId === examSessionId,
+    )
+
+    const sessionSubmissionMap = new Map(sessionSubmissions.map((submission) => [submission.id, submission]))
+
+    const gradedSubmissions = (Array.isArray(grades) ? grades : [])
+      .filter((grade) => sessionSubmissionMap.has(grade.submissionId))
+      .map((grade) => ({
+        submissionId: grade.submissionId,
+        studentId: sessionSubmissionMap.get(grade.submissionId)?.studentId || 'Không rõ MSSV',
+        finalScore: grade.finalScore,
+      }))
+
+    return {
+      totalSubmissions: sessionSubmissions.length,
+      gradedSubmissions,
+    }
+  }
 
   const [formData, setFormData] = useState({
     examSessionId: '',
-    examinerId: '',
     zipFile: null,
+    excelTemplate: null,
   })
 
   const features = [
@@ -90,17 +192,13 @@ function HomePage() {
     'Xuất báo cáo điểm và phản hồi cho sinh viên',
   ]
 
-  // Load exam sessions and users
+  // Load exam sessions
   useEffect(() => {
     const loadData = async () => {
       try {
         setIsLoadingData(true)
-        const [sessions, usersList] = await Promise.all([
-          examSessionApi.getAll(),
-          userApi.getAll(),
-        ])
+        const sessions = await examSessionApi.getAll()
         setExamSessions(Array.isArray(sessions) ? sessions : [])
-        setUsers(Array.isArray(usersList) ? usersList : [])
       } catch (error) {
         console.error('Lỗi tải dữ liệu:', error)
       } finally {
@@ -119,10 +217,11 @@ function HomePage() {
   }
 
   const handleFileChange = (e) => {
-    const file = e.target.files?.[0]
+    const { name, files } = e.target
+    const file = files?.[0]
     setFormData((prev) => ({
       ...prev,
-      zipFile: file || null,
+      [name]: file || null,
     }))
   }
 
@@ -136,17 +235,84 @@ function HomePage() {
       setMessage({ type: 'error', text: 'Vui lòng chọn đợt thi' })
       return
     }
-    if (!formData.examinerId) {
-      setMessage({ type: 'error', text: 'Vui lòng chọn người chấm' })
-      return
-    }
     if (!formData.zipFile) {
       setMessage({ type: 'error', text: 'Vui lòng chọn file bài thi (.zip)' })
       return
     }
+    if (!formData.excelTemplate) {
+      setMessage({ type: 'error', text: 'Vui lòng chọn file mẫu Excel (.xlsx)' })
+      return
+    }
+
+    let progressIntervalId = null
 
     try {
       setIsLoading(true)
+      setLiveProgress({ totalSubmissions: 0, gradedCount: 0, latestStudents: [] })
+      gradedSubmissionIdSetRef.current = new Set()
+      baselineSubmissionIdSetRef.current = new Set()
+      notificationQueueRef.current = []
+
+      try {
+        const baselineProgress = await getGradingProgressByExamSession(formData.examSessionId)
+        baselineSubmissionIdSetRef.current = new Set(
+          baselineProgress.gradedSubmissions.map((item) => item.submissionId),
+        )
+      } catch {
+        baselineSubmissionIdSetRef.current = new Set()
+      }
+
+      if (notificationDrainIntervalRef.current !== null) {
+        window.clearInterval(notificationDrainIntervalRef.current)
+      }
+
+      notificationDrainIntervalRef.current = window.setInterval(() => {
+        if (notificationQueueRef.current.length === 0) return
+
+        const nextItem = notificationQueueRef.current.shift()
+        setLiveProgress((prev) => ({
+          ...prev,
+          latestStudents: [nextItem, ...prev.latestStudents].slice(0, 4),
+        }))
+      }, 800)
+
+      let isPollingLocked = false
+      const refreshProgress = async () => {
+        if (isPollingLocked) return
+
+        isPollingLocked = true
+        try {
+          const progress = await getGradingProgressByExamSession(formData.examSessionId)
+
+          const currentRunGraded = progress.gradedSubmissions.filter(
+            (item) => !baselineSubmissionIdSetRef.current.has(item.submissionId),
+          )
+
+          const newlyGraded = currentRunGraded
+            .filter((item) => !gradedSubmissionIdSetRef.current.has(item.submissionId))
+            .slice(-6)
+
+          newlyGraded.forEach((item) => {
+            gradedSubmissionIdSetRef.current.add(item.submissionId)
+          })
+
+          if (newlyGraded.length > 0) {
+            notificationQueueRef.current.push(...newlyGraded)
+          }
+
+          setLiveProgress((prev) => ({
+            ...prev,
+            totalSubmissions: progress.totalSubmissions,
+            gradedCount: currentRunGraded.length,
+          }))
+        } catch {
+          // Không chặn luồng chấm điểm nếu lỗi poll tiến độ
+        } finally {
+          isPollingLocked = false
+        }
+      }
+
+      progressIntervalId = window.setInterval(refreshProgress, 2500)
 
       // Get exam session info
       const selectedSession = examSessions.find((s) => s.id === formData.examSessionId)
@@ -157,24 +323,73 @@ function HomePage() {
       // Build form data
       const requestFormData = new FormData()
       requestFormData.append('examSessionId', formData.examSessionId)
-      requestFormData.append('examinerId', formData.examinerId)
       requestFormData.append('zipFile', formData.zipFile)
+      requestFormData.append('excelTemplate', formData.excelTemplate)
       requestFormData.append('subjectCode', selectedSession.subjectCode || '')
       requestFormData.append('semesterCode', selectedSession.semesterName || '')
 
-      const result = await gradingApi.processBatch(requestFormData)
-      setGradingResult(result)
-      setMessage({ type: 'success', text: result.message })
+      const result = await gradingApi.processBatchExcel(requestFormData)
+      if (progressIntervalId !== null) {
+        window.clearInterval(progressIntervalId)
+      }
+      await refreshProgress()
+
+      let gradedCount = null
+      try {
+        gradedCount = await getGradedCountByExamSession(formData.examSessionId)
+      } catch {
+        gradedCount = null
+      }
+
+      const resultData = {
+        fileName: result.fileName,
+        fileBlob: result.blob,
+        sizeMb: (result.blob.size / 1024 / 1024).toFixed(2),
+        gradedCount,
+      }
+
+      setGradingResult(resultData)
+
+      // Save to localStorage for GradeReviewPage access
+      try {
+        const base64Data = await blobToBase64(result.blob)
+        localStorage.setItem(
+          'gradingResult',
+          JSON.stringify({
+            fileName: result.fileName,
+            fileBlob: base64Data,
+            sizeMb: (result.blob.size / 1024 / 1024).toFixed(2),
+            gradedCount,
+          }),
+        )
+      } catch (error) {
+        console.error('Lỗi lưu file vào localStorage:', error)
+      }
+
+      setMessage({
+        type: 'success',
+        text:
+          gradedCount === null
+            ? 'Chấm điểm thành công. Bấm nút bên dưới để tải file kết quả.'
+            : `Đã chấm xong toàn bộ ${gradedCount} bài. Bấm nút bên dưới để tải file kết quả.`,
+      })
 
       // Reset form
       setFormData({
         examSessionId: '',
-        examinerId: '',
         zipFile: null,
+        excelTemplate: null,
       })
     } catch (error) {
       setMessage({ type: 'error', text: error.message })
     } finally {
+      if (progressIntervalId !== null) {
+        window.clearInterval(progressIntervalId)
+      }
+      if (notificationDrainIntervalRef.current !== null) {
+        window.clearInterval(notificationDrainIntervalRef.current)
+        notificationDrainIntervalRef.current = null
+      }
       setIsLoading(false)
     }
   }
@@ -183,11 +398,30 @@ function HomePage() {
     setIsGradingModalOpen(false)
     setMessage(null)
     setGradingResult(null)
+    setLiveProgress({ totalSubmissions: 0, gradedCount: 0, latestStudents: [] })
+    notificationQueueRef.current = []
+    if (notificationDrainIntervalRef.current !== null) {
+      window.clearInterval(notificationDrainIntervalRef.current)
+      notificationDrainIntervalRef.current = null
+    }
     setFormData({
       examSessionId: '',
-      examinerId: '',
       zipFile: null,
+      excelTemplate: null,
     })
+  }
+
+  const handleDownloadResult = () => {
+    if (!gradingResult?.fileBlob || !gradingResult?.fileName) return
+
+    const downloadUrl = URL.createObjectURL(gradingResult.fileBlob)
+    const anchor = document.createElement('a')
+    anchor.href = downloadUrl
+    anchor.download = gradingResult.fileName
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(downloadUrl)
   }
 
   return (
@@ -199,7 +433,7 @@ function HomePage() {
               ExamGrading Platform
             </p>
             <h1 className="mt-4 text-3xl font-bold leading-tight text-slate-900 md:text-5xl md:leading-tight">
-              Nền tảng chấm điểm tự động cho giảng viên đại học
+              Nền tảng chấm điểm PRN231 / PRN232
             </h1>
             <p className="mt-4 max-w-xl text-base leading-relaxed text-slate-600 md:text-lg">
               Tăng tốc quy trình chấm thi, chuẩn hóa tiêu chí đánh giá và giảm tải
@@ -288,7 +522,7 @@ function HomePage() {
                 </button>
               </div>
               <p className="mt-1 text-sm text-slate-600">
-                Tải lên file bài thi (.zip) để bắt đầu quá trình chấm điểm tự động
+                Tải lên file bài thi (.zip) và file mẫu lớp (.xlsx) để chấm điểm tự động
               </p>
             </div>
 
@@ -312,18 +546,26 @@ function HomePage() {
                 <div className="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
                   <h3 className="font-semibold text-emerald-900">✓ Chấm điểm thành công</h3>
                   <div className="text-sm text-emerald-800">
-                    <p className="font-medium">{gradingResult.message}</p>
-                    {Array.isArray(gradingResult.processedSubmissionIds) && (
-                      <p className="mt-2">
-                        ID bài thi:{' '}
-                        <span className="font-mono text-xs">
-                          {gradingResult.processedSubmissionIds.slice(0, 2).join(', ')}
-                          {gradingResult.processedSubmissionIds.length > 2 &&
-                            `, +${gradingResult.processedSubmissionIds.length - 2} bài khác`}
-                        </span>
-                      </p>
-                    )}
+                    <p className="font-medium">Kết quả đã sẵn sàng để tải về.</p>
+                    <p className="mt-2">
+                      Tệp: <span className="font-semibold">{gradingResult.fileName}</span>
+                    </p>
+                    <p>Dung lượng: {gradingResult.sizeMb} MB</p>
+                    <p>
+                      Tổng số bài đã chấm:{' '}
+                      <span className="font-semibold">
+                        {gradingResult.gradedCount === null ? '--' : gradingResult.gradedCount}
+                      </span>
+                    </p>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={handleDownloadResult}
+                    className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 font-semibold text-white transition hover:bg-emerald-700"
+                  >
+                    Tải file Excel kết quả
+                  </button>
                 </div>
               )}
 
@@ -351,28 +593,6 @@ function HomePage() {
                     </select>
                   </div>
 
-                  {/* Examiner Selection */}
-                  <div>
-                    <label htmlFor="examiner" className="block text-sm font-medium text-slate-700">
-                      Chọn người chấm <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      id="examiner"
-                      name="examinerId"
-                      value={formData.examinerId}
-                      onChange={handleInputChange}
-                      disabled={isLoadingData || isLoading}
-                      className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 shadow-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:cursor-not-allowed disabled:bg-slate-100"
-                    >
-                      <option value="">-- Vui lòng chọn người chấm --</option>
-                      {users.map((user) => (
-                        <option key={user.id} value={user.id}>
-                          {user.fullName} ({user.username})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
                   {/* File Upload */}
                   <div>
                     <label htmlFor="zip-file" className="block text-sm font-medium text-slate-700">
@@ -381,6 +601,7 @@ function HomePage() {
                     <div className="mt-1 rounded-lg border-2 border-dashed border-slate-300 px-6 py-8 text-center">
                       <input
                         id="zip-file"
+                        name="zipFile"
                         type="file"
                         accept=".zip,.rar"
                         onChange={handleFileChange}
@@ -407,6 +628,74 @@ function HomePage() {
                       </label>
                     </div>
                   </div>
+
+                  <div>
+                    <label htmlFor="excel-template" className="block text-sm font-medium text-slate-700">
+                      Tải lên file mẫu lớp (.xlsx) <span className="text-red-500">*</span>
+                    </label>
+                    <div className="mt-1 rounded-lg border-2 border-dashed border-slate-300 px-6 py-6 text-center">
+                      <input
+                        id="excel-template"
+                        name="excelTemplate"
+                        type="file"
+                        accept=".xlsx"
+                        onChange={handleFileChange}
+                        disabled={isLoading}
+                        className="hidden"
+                      />
+                      <label htmlFor="excel-template" className="cursor-pointer">
+                        {formData.excelTemplate ? (
+                          <div className="space-y-2">
+                            <p className="text-sm font-medium text-emerald-700">✓ File mẫu đã chọn</p>
+                            <p className="text-xs text-slate-600">{formData.excelTemplate.name}</p>
+                            <p className="text-xs text-slate-500">
+                              ({(formData.excelTemplate.size / 1024 / 1024).toFixed(2)} MB)
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <p className="text-sm font-medium text-slate-700">
+                              📊 Kéo thả file hoặc bấm để chọn
+                            </p>
+                            <p className="text-xs text-slate-500">Hỗ trợ file .xlsx</p>
+                          </div>
+                        )}
+                      </label>
+                    </div>
+                  </div>
+
+                  {isLoading && (
+                    <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4">
+                      <p className="text-sm font-semibold text-indigo-900">Đang chấm bài thi</p>
+                      <p className="mt-1 text-sm text-indigo-800">
+                        Đã chấm:{' '}
+                        <span className="font-semibold">
+                          {liveProgress.gradedCount}
+                          {liveProgress.totalSubmissions > 0 ? `/${liveProgress.totalSubmissions}` : ''}
+                        </span>
+                      </p>
+
+                      {liveProgress.latestStudents.length > 0 ? (
+                        <ul className="mt-2 space-y-1 text-xs text-indigo-800">
+                          {liveProgress.latestStudents.map((item) => (
+                            <li key={item.submissionId} className="rounded bg-white/70 px-2 py-1">
+                              ✓ Đã chấm xong bài{' '}
+                              <span className="font-semibold">{item.studentId}</span>{' '}
+                              • Điểm:{' '}
+                              <span className={`font-semibold ${getRealtimeScoreColorClass(item.finalScore)}`}>
+                                {Number.isNaN(Number(item.finalScore))
+                                  ? '--'
+                                  : Number(item.finalScore).toFixed(2)}
+                              </span>
+                              
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-xs text-indigo-700">Đang chờ bài đầu tiên hoàn tất...</p>
+                      )}
+                    </div>
+                  )}
 
                   {/* Submit Button */}
                   <button
